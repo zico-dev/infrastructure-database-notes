@@ -1,0 +1,1080 @@
+PostgreSQL Notes
+
+******What's New******
+RDS Postgres: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_PostgreSQL.html
+
+RDS Postgres version: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_PostgreSQL.html#PostgreSQL.Concepts
+
+RDS Postgres 11, currently on DB preview: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_PostgreSQL.html#PostgreSQL.Concepts.General.version11
+Postgres 11 release notes: https://www.postgresql.org/about/news/1894/
+
+Postgres  10, What's new: https://wiki.postgresql.org/wiki/New_in_postgres_10
+key things: native partitioning, logical replication (publication/subscription ), temporary replication slots etc.
+
+RDS Postgres 9.6.9, customers can now modify temp_file_limit (used to limit the size of temp files)
+https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_PostgreSQL.html#PostgreSQL.Concepts.General.version969
+
+IAM Authentication for RDS Postgres:
+https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.DBAccounts.html
+
+******What's New******
+*******ToCheckParameterSettings*******
+select name from pg_settings;
+
+https://www.postgresql.org/docs/9.4/static/view-pg-settings.html
+*******ToCheckParameterSettings*******
+
+******RunningProcesses******
+Check for current running processes:
+Select * from pg_stat_activity;
+To describe a table use the following: \d+ pg_stat_activity
+
+test=# SELECT datname, count(*) AS open,count(*) FILTER (WHERE state = 'active') AS active, count(*) FILTER (WHERE state = 'idle') AS idle, count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_trans  FROM pg_stat_activity  GROUP BY ROLLUP(1); 
+ datname | open | active | idle | idle_in_trans
+---------+------+--------+------+---------------
+  dev     |    1 |      1 |    0 |             0  
+  test    |    2 |      1 |    0 |             1         
+          |    3 |      2 |    0 |             1 
+          
+(3 rows) 
+******RunningProcesses******
+
+******DataDirectory******
+To see where the data directory: show data_directory;
+******DataDirectory******
+
+******DatabaseSize*******
+To see the size of a particular database and a table: test=# select pg_size_pretty(pg_database_size('test')); table: select pg_relation_size('customer');
+To get the total size of the ALL database in your RDS Postgres use the below query. Excluded the "rdsadmin" database, customer don't have access to it.
+Test_DB=> SELECT sum(pg_database_size(datname))/1024/1024/1024 as "GB" from pg_database where datname not in ('rdsadmin');
+         GB          
+---------------------
+ 34.8594423867762090
+ 
+select main/1024/1024/1024 as main, vm/1024/1024/1024 as vm, fsm/1024/1024/1024 as fsm,
+toast/1024/1024/1024 as toast, indexes/1024/1024/1024 as indexes,
+sum_of_values,pg_database_size, diff from ( 
+SELECT
+    SUM(pg_relation_size(oid, 'main')) AS main,
+    SUM(pg_relation_size(oid, 'vm')) AS vm,
+    SUM(pg_relation_size(oid, 'fsm')) AS fsm,
+    SUM(
+        CASE reltoastrelid
+        WHEN 0 THEN 0
+        ELSE pg_total_relation_size(reltoastrelid)
+        END
+    ) AS toast,
+    SUM(pg_indexes_size(oid)) AS indexes,
+    pg_size_pretty(
+        SUM(pg_relation_size(oid, 'main'))::bigint +
+        SUM(pg_relation_size(oid, 'vm'))::bigint +
+        SUM(pg_relation_size(oid, 'fsm'))::bigint +
+        SUM(pg_indexes_size(oid))::bigint +
+        SUM(
+            CASE reltoastrelid
+            WHEN 0 THEN 0
+            ELSE pg_total_relation_size(reltoastrelid)
+            END
+        )::bigint
+    ) AS sum_of_values,
+    pg_size_pretty(pg_database_size(current_database())) AS pg_database_size,
+
+    pg_size_pretty(
+        SUM(pg_relation_size(oid, 'main'))::bigint +
+        SUM(pg_relation_size(oid, 'vm'))::bigint +
+        SUM(pg_relation_size(oid, 'fsm'))::bigint +
+        SUM(pg_indexes_size(oid))::bigint +
+        SUM(
+            CASE reltoastrelid
+            WHEN 0 THEN 0
+            ELSE pg_total_relation_size(reltoastrelid)
+            END
+        )::bigint - pg_database_size(current_database())::bigint
+    ) AS diff
+
+FROM pg_class
+WHERE reltype != 0  and not relisshared) t
+
+
+******DatabaseSize*******
+
+******PostgresDatabaseDesign*******
+In Postgres, a database has one or more “schemas”, which contain tables. 
+To create a schema: test=# create schema zicky;
+To change a table schema: test=# alter table customer set schema zicky;
+To see the objects in a schema: test=# select * from information_schema.tables where table_schema = 'zicky';
+The information_schema is a schema that has a lot of views. To list all the object within a schema: \d information_schema.<tab><tab>
+How to check for indexes on a table: \d table_name
+In Postgres: changes to the database are made to the REDO log file before it is written to the data file. The REDO log buffer is flushed to the redo log file after a commit.
+******PostgresDatabaseDesign*******
+
+*******Locking********
+Locking Problems:
+The easiest way to find out if you do is to see if there are many backends waiting on locks by running the following query:
+SELECT * FROM pg_locks WHERE NOT granted;
+
+To see which queries are waiting on which other queries, run the following:
+SELECT
+    a1.query AS blocking_query, a1.state AS blocking_query_state, 
+    a2.query AS waiting_query, a2.state AS waiting_query_state,
+    t.schemaname || '.' || t.relname AS locked_table
+ FROM pg_stat_activity a1
+ JOIN pg_locks p1 ON a1.pid = p1.pid AND p1.granted
+ JOIN pg_locks p2 ON p1.relation = p2.relation AND NOT p2.granted
+ JOIN pg_stat_activity a2 ON a2.pid = p2.pid
+ JOIN pg_stat_all_tables t ON p1.relation = t.relid;
+
+SELECT
+    a1.query AS blocking_query, a1.state AS blocking_query_state, to_char(a1.query_start, 'DD Mon YYYY HH24:MI:SS') as query_start_time, 
+    a2.query AS waiting_query, a2.state AS waiting_query_state,
+    t.schemaname || '.' || t.relname AS locked_table
+ FROM pg_stat_activity a1
+ JOIN pg_locks p1 ON a1.pid = p1.pid AND p1.granted
+ JOIN pg_locks p2 ON p1.relation = p2.relation AND NOT p2.granted
+ JOIN pg_stat_activity a2 ON a2.pid = p2.pid
+ JOIN pg_stat_all_tables t ON p1.relation = t.relid;
+
+To lock a table use: can be done by issuing a begin statement: 
+begin; 
+lock table_name;  this locks the table. You can run the above query to see sessions that are waiting. 
+*******Locking********
+*******Indexes******
+Indexes:
+PostgreSQL keeps track of each access against an index. We can view that information and use it to see whether an index is unused, as follows:
+postgres=# SELECT schemaname, relname, indexrelname, idx_scan FROM pg_stat_user_indexes ORDER BY idx_scan;
+ schemaname |       indexrelname       | idx_scan
+------------+--------------------------+----------
+ public     | pgbench_accounts_bid_idx |        0
+ public     | pgbench_branches_pkey    |    14575
+ public     | pgbench_tellers_pkey     |    15350
+ public     | pgbench_accounts_pkey    |   114400
+(4 rows)
+As we can see in the preceding code, there is one index that is totally unused, alongside others that have some usage. You now need to decide whether "unused" means you should remove the index. That is a more complex question, and we first need to explain how it works.
+*******Indexes******
+select count(*), datname from pg_stat_activity where state='IDLE'  group by datname ;
+*******PG_DUMP:******
+[ec2-user@my-domain-1 ~]$ pg_dump --host=postgresql.endpoint.us-east-1.rds.amazonaws.com --port=5432 --username=zicky  --dbname=Test_DB --table=testing_stuff > db.out
+Password: 
+pg_dump: server version: 9.4.5; pg_dump version: 9.3.11
+pg_dump: aborting because of server version mismatch
+Your pg_dump version should match the version of your RDS Postgres server, hence you will get the above error.
+*******PG_DUMP:******
+
+*****Replication******
+Streaming Replication: refers to the ability to stream new data pages over a network connection
+If you use streaming replication without file-based continuous archiving, the server might recycle old WAL segments before the standby has received them. 
+If this occurs, the standby will need to be reinitialized from a new base backup. 
+You can avoid this by setting wal_keep_segments to a value large enough to ensure that WAL segments are not recycled too early, or by configuring a replication slot for the standby. 
+If you set up a WAL archive that's accessible from the standby, these solutions are not required, since the standby can always use the archive to catch up provided it retains enough segments.
+
+Hot Standby: refers to the ability of standbys to run read-only queries while in standby mode.
+Wal_keep_segments(integer): specifies the minimum number of past log file segments kept in the pg_xlog directory, in a case a standby server needs to fetch them for streaming replication.
+*****Replication******
+
+*****Analyze******
+postgres=# analyze verbose public.tea3;
+INFO:  analyzing "public.tea3"
+INFO:  "tea3": scanned 1 of 1 pages, containing 6 live rows and 1 dead rows; 6 rows in sample, 6 estimated total rows
+ANALYZE
+https://www.postgresql.org/docs/9.1/static/sql-analyze.html
+*****Analyze******
+******EXPLAIN******
+postgres=# EXPLAIN (FORMAT JSON) SELECT * FROM tea2;
+           QUERY PLAN           
+--------------------------------
+ [                             +
+   {                           +
+     "Plan": {                 +
+       "Node Type": "Seq Scan",+
+       "Relation Name": "tea2",+
+       "Alias": "tea2",        +
+       "Startup Cost": 0.00,   +
+       "Total Cost": 22.00,    +
+       "Plan Rows": 1200,      +
+       "Plan Width": 38        +
+     }                         +
+   }                           +
+ ]
+(1 row)
+https://www.postgresql.org/docs/9.1/static/sql-explain.html
+
+Use the EXPLAIN to see the execution plan: explain select * from pg_stat_activity;
+Use EXPLAIN ANALYZE to see the cost of a query, but this executes the query as well: EXPLAIN ANALYZE select * from pg_stat_activity;
+
+Note: using explain does not actually execute the query
+Test_DB=> \timing
+Timing is on.
+Test_DB=> explain select * from "Customers";
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Seq Scan on "Customers"  (cost=0.00..1.05 rows=5 width=137)
+(1 row)
+
+Time: 1.431 ms
+******EXPLAIN******
+******PostgresExtensions******
+select name, default_version from pg_available_extensions;
+To view installed extensions
+Test_DB=> \dx
+To see available extensions
+Test_DB=> show rds.extensions;
+https://www.postgresql.org/docs/9.1/static/view-pg-available-extensions.html
+******PostgresExtensions******
+
+delete from t_test where id > 99000 or id < 1000;
+insert into t_test select * from generate_series(1, 100000);
+******TempUsage******
+SELECT temp_files AS "Temporary files"
+     , temp_bytes AS "Size of temporary files"
+FROM   pg_stat_database db;
+
+###temp_files 	bigint 	Number of temporary files created by queries in this database. All temporary files are counted, regardless of why the temporary file was created (e.g., sorting or hashing), and regardless of the log_temp_files setting.
+###temp_bytes 	bigint 	Total amount of data written to temporary files by queries in this database. All temporary files are counted, regardless of why the temporary file was created, and regardless of the log_temp_files setting.
+###Enable log_tempfiles which shows the size of temp files and it can help tune the work_mem
+******TempUsage******
+
+******LimitDatabaseConnectionsForUser******
+Test_DB=> select rolconnlimit, rolname from pg_roles;
+Test_DB=> alter user noah with connection limit 10;
+
+
+******DetectReplicationLag******
+select now() - pg_last_xact_replay_timestamp() AS replication_delay;
+******DetectReplicationLag******
+
+******CheckInformationAboutVacuum/Analyze******
+Test_DB=> select last_vacuum, last_analyze, last_autoanalyze from pg_stat_all_tables where relname='emp_data';
+ last_vacuum |         last_analyze          | last_autoanalyze 
+-------------+-------------------------------+------------------
+             | 2016-06-17 13:08:34.131161+00 | 
+******CheckInformationAboutVacuum/Analyze******
+
+******ToCheckAndLimitTheAmountOfConnectionPerUser******
+select rolconnlimit, rolname from pg_roles where rolname='user_name';
+	--ToChangeTheValue: alter user user_name with connection limit 10;
+#ToCheckConnectionLimitForADatabase: select datname, datconnlimit from pg_database; (default is -1, which means it accepts unlimited amount of connection)
+ 	--ToChangeTheValue: alter database newdb connection limit 5;  
+
+******DeleteRowsFromATableInPostgres******
+delete from begin2 where ctid in (select ctid from begin2 limit 140); #ctid is an invisible column that all tables have
+******DeleteRowsFromATableInPostgres******
+
+******PrintingOnlyTheResultsOfAQuery******
+psql --host=postgresql.endpoint.us-east-1.rds.amazonaws.com --port=5432 --username=noah  --dbname=Test_DB -t #the -t flag will only print the result
+Test_DB=> select * from begin1;
+ zicky123
+ james123
+******PrintingOnlyTheResultsOfAQuery******
+
+******ConcatenationWithPostgres******
+select 'ANALYZE '||relname||';' from pg_stat_all_tables where last_autovacuum < now() - interval '2 days' and schemaname='public';
+    ?column?     
+-----------------
+ ANALYZE begin2;
+******ConcatenationWithPostgres******
+
+******WorkingWithDates******
+postgres=# select now() - query_start AS Delay from pg_stat_activity;
+      delay      
+-----------------
+ 00:10:52.635256
+ 00:00:00
+ 
+ 
+select date_part('Hour', now() - 1);
+select now() - interval '1 hour';
+select now();
+select now() - interval '1 hours';
+select now()::HH24::MI - interval '1 hours';
+
+#cur.execute("select datname, usename, query_start from pg_stat_activity where query_start < now() - interval '1 minutes';")
+cur.execute("select to_char(current_timestamp - interval '1 minutes', 'HH12:MI:SS');")
+
+
+select datname, usename, query_start from pg_stat_activity where query_start to_char(current_timestamp - interval '1 minutes', 'HH12:MI:SS');
+
+This work!!!!!
+Test_DB=> select datname, to_char(query_start, 'HH12:MI:SS'), usename from pg_stat_activity where query_start < now() - interval '1 minutes';
+ datname | to_char  | usename 
+---------+----------+---------
+ Test_DB | 02:59:06 | noah
+(1 row)
+
+Test_DB=> select to_char(current_timestamp - interval '1 minutes', 'HH12:MI:SS');
+ to_char  
+----------
+ 03:03:10
+******WorkingWithDates****** 
+
+******BlockingSessions******
+SELECT bl.pid AS blocked_pid, a.usename AS blocked_user, 
+         kl.pid AS blocking_pid, ka.usename AS blocking_user, a.current_query AS blocked_statement
+  FROM pg_catalog.pg_locks bl
+       JOIN pg_catalog.pg_stat_activity a
+       ON bl.pid = a.pid
+       JOIN pg_catalog.pg_locks kl
+            JOIN pg_catalog.pg_stat_activity ka
+            ON kl.pid = ka.pid
+       ON bl.transactionid = kl.transactionid AND bl.pid != kl.pid
+  WHERE NOT bl.granted ;
+******BlockingSessions******
+
+******FilePerTableExample******
+Test_DB=> create table zicky_test (name varchar(40), address varchar(70));
+CREATE TABLE
+Test_DB=> \dt
+                List of relations
+ Schema |      Name       | Type  |     Owner     
+--------+-----------------+-------+---------------
+ public | zicky_test      | table | zicky
+(9 rows)
+
+Test_DB=> select pg_relation_filepath('zicky_test');
+ pg_relation_filepath 
+----------------------
+ base/16394/22594
+(1 row)
+
+Test_DB=> drop table zicky_test ;
+DROP TABLE
+Test_DB=> select pg_relation_filepath('zicky_test');
+ERROR:  relation "zicky_test" does not exist
+LINE 1: select pg_relation_filepath('zicky_test');
+	                                  ^
+Test_DB=> 
+******FilePerTableExample******
+
+******TablesSizes******
+SELECT
+relname as "Table",
+pg_size_pretty(pg_total_relation_size(relid)) As "Size",
+pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) as "External Size"
+FROM pg_catalog.pg_statio_user_tables ORDER BY pg_total_relation_size(relid) DESC;
+
+SELECT
+relname as "Table",
+pg_size_pretty(pg_total_relation_size(relid)) As "Size"
+FROM pg_catalog.pg_statio_user_tables ORDER BY pg_total_relation_size(relid) DESC;
+
+select sum(size1) from (SELECT
+   relname as "Table",
+   pg_total_relation_size(relid)/(1024*1024*1024) As "size1",
+   pg_total_relation_size(relid) As "size1",
+   pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) as "External Size"
+   FROM pg_catalog.pg_statio_all_tables ORDER BY pg_total_relation_size(relid) DESC) t
+   
+   
+   select sum(size1) from (SELECT
+   relname as "index",
+   pg_total_relation_size(relid)/(1024*1024*1024) As "size1",
+  -- pg_total_relation_size(relid) As "size1",
+   pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) as "External Size"
+   FROM pg_catalog.pg_statio_all_indexes ORDER BY pg_total_relation_size(relid) DESC) t
+
+select relname,pg_size_pretty(pg_relation_size(oid))  from pg_class order by pg_relation_size(oid) desc  limit 10 ;
+
+
+###Check the amount of tables in the Postgres server: SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema','pg_catalog');
+Below shows the 10 biggest tables
+SELECT table_name, pg_relation_size(table_schema || '.' || table_name) as size
+FROM information_schema.tables
+WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+ORDER BY size DESC
+LIMIT 10;
+
+
+******TablesSizes******
+
+******CheckPostgresUptime******
+SELECT date_trunc('second', current_timestamp - pg_postmaster_start_time()) as uptime;
+      uptime      
+------------------
+ 34 days 22:51:40
+******CheckPostgresUptime******
+
+******PostgresTransactionID(XID)******
+Session one: verify the current XID 
+Test_DB=> select now();
+              now              
+-------------------------------
+ 2018-06-28 12:58:19.207012+00
+(1 row)
+
+Test_DB=> select txid_current();
+ txid_current 
+--------------
+       258337
+(1 row)
+
+Session two: update the spoon table and change 'James' to 'ruler' -> after session one was started
+Test_DB=> begin;
+BEGIN
+Test_DB=> select now();
+              now              
+-------------------------------
+ 2018-06-28 13:02:37.219991+00
+(1 row)
+
+Test_DB=> select txid_current();
+ txid_current 
+--------------
+       258340
+(1 row)
+
+Test_DB=> update spoon set type='ruler' where type='James';
+UPDATE 1
+Test_DB=> select xmin, xmax, type from spoon;
+  xmin  | xmax | type  
+--------+------+-------
+ 232065 |    0 | test
+ 258340 |    0 | ruler
+(2 rows)
+
+Session one: if we query the spoon table after session two updated the row, we see that xmax has been changed by XID '258340', 
+and session one will be reading from a snapshot of the xmin '258063' because session two hasn't committed or rollback so it shouldn't be visible
+Test_DB=> select xmin, xmax, type from spoon;
+  xmin  |  xmax  | type  
+--------+--------+-------
+ 232065 |      0 | test
+ 258063 | 258340 | James
+(2 rows)
+
+After session two commits, and we query the spoon table, the updated row will have the new xmin '258340'
+Test_DB=> select xmin, xmax, type from spoon;
+  xmin  | xmax | type  
+--------+------+-------
+ 232065 |    0 | test
+ 258340 |    0 | ruler
+(2 rows)
+
+******PostgresTransactionID(XID)******
+
+******pgstattuple******
+This extension gives us more information about dead tuples (rows) in a table. It can help us determine if vacuum is really needed. https://www.postgresql.org/docs/9.5/static/pgstattuple.html
+Test_DB=> create extension pgstattuple;
+CREATE EXTENSION 
+Test_DB=> \dt+ zicky_test
+                     List of relations
+ Schema |    Name    | Type  | Owner | Size  | Description 
+--------+------------+-------+-------+-------+-------------
+ public | zicky_test | table | zicky | 15 GB | 
+(1 row)
+
+Test_DB=> select * from pgstattuple('zicky_test');
+  table_len  | tuple_count |  tuple_len  | tuple_percent | dead_tuple_count | dead_tuple_len | dead_tuple_percent | free_space | free_percent 
+-------------+-------------+-------------+---------------+------------------+----------------+--------------------+------------+--------------
+ 15700557824 |   390094080 | 12357051904 |          78.7 |                0 |              0 |                  0 |   37958840 |         0.24
+(1 row)
+"dead_tuple_percent" indicates the % of dead tuples (rows) in a table, the higher the % means that we can perform a VACUUM FULL to reclaim space
+******pgstattuple******
+
+******pg_stat_statements******
+You can find the expensive queries with pg_stat_statements. This would be stats since the server started unless someone called pg_stats_statment_reset.
+
+create extension pg_stat_statements;
+
+SELECT query, calls, total_time, rows, temp_blks_read, temp_blks_written,
+100.0 * shared_blks_hit / nullif(shared_blks_hit + shared_blks_read, 0) AS hit_percent
+FROM pg_stat_statements
+where temp_blks_written > 0
+ORDER BY total_time DESC LIMIT 50; 
+******pg_stat_statements******
+
+******CheckForReplicationSlots******
+select * from pg_replication_slots;
+Test_DB=> \d pg_replication_slots 
+View "pg_catalog.pg_replication_slots"
+    Column    |  Type   | Modifiers 
+--------------+---------+-----------
+ slot_name    | name    | 
+ plugin       | name    | 
+ slot_type    | text    | 
+ datoid       | oid     | 
+ database     | name    | 
+ active       | boolean | 
+ xmin         | xid     | 
+ catalog_xmin | xid     | 
+ restart_lsn  | pg_lsn  | 
+
+5713449209
+To drop inactive replication slots
+SELECT pg_drop_replication_slot('replication_slot_name');
+******CheckForReplicationSlots******
+
+******TablePrivileges******
+Test_DB=> select has_table_privilege('public.aws_test', 'select');
+ has_table_privilege 
+---------------------
+ t
+ OR
+Test_DB=> \z aws_test
+                             Access privileges
+ Schema |   Name   | Type  |  Access privileges  | Column access privileges 
+--------+----------+-------+---------------------+--------------------------
+ public | aws_test | table | zicky=arwdDxt/zicky+| 
+        |          |       | ziyan=r/zicky       | 
+(1 row)
+******TablePrivileges******
+
+******PG_XLOG_SIZE******
+The below shows, the way to calculate the amount of WAL generated within a certain time period
+We can get the difference between two log locations, which should give us the amount of WAL generated
+select pg_current_xlog_location(); ###This shows the current log location
+pg_current_xlog_insert_location 
+---------------------------------
+ 3D/B4020A58
+(1 row)
+
+postgres=# SELECT pg_current_xlog_insert_location();
+ pg_current_xlog_insert_location 
+---------------------------------
+ 3E/2203E0F8
+(1 row)
+
+postgres=# SELECT pg_xlog_location_diff('3E/2203E0F8', '3D/B4020A58');
+ pg_xlog_location_diff 
+-----------------------
+            1845614240
+(1 row)
+1.8 GB
+select slot_name,pg_size_pretty(pg_xlog_location_diff(pg_current_xlog_location(),restart_lsn)) from pg_replication_slots;
+******PG_XLOG_SIZE******
+
+******ColumnLevelAccess******
+Restrict users to only have access to specific columns in a table
+Test_DB=> select now();
+             now              
+------------------------------
+ 2018-02-14 18:33:41.66851+00
+(1 row)
+
+Test_DB=> select current_user;
+ current_user 
+--------------
+ zicky
+(1 row)
+
+Test_DB=> select grantee, table_name, column_name, privilege_type from information_schema.column_privileges where table_name='emp_data' and grantee='testson';
+ grantee | table_name | column_name | privilege_type 
+---------+------------+-------------+----------------
+ testson | emp_data   | name        | SELECT
+(1 row)
+
+Test_DB=> select * from emp_data;
+ name  |        address        
+-------+-----------------------
+ zicky | 25867 Washington Blvd
+ james | 79873 Herndon Ave.
+(2 rows)
+
+Test_DB=> select now();
+              now              
+-------------------------------
+ 2018-02-14 18:35:18.231542+00
+(1 row)
+
+Test_DB=> select current_user;
+ current_user 
+--------------
+ testson
+(1 row)
+
+Test_DB=> select name from emp_data;
+ name  
+-------
+ zicky
+ james
+(2 rows)
+
+Test_DB=> select * from emp_data;
+ERROR:  permission denied for relation emp_data
+Test_DB=> select address from emp_data;
+ERROR:  permission denied for relation emp_data
+Test_DB=>
+******ColumnLevelAccess******
+
+Test_DB=> select rolconnlimit, rolname from pg_roles where rolname='test_user';
+ rolconnlimit | rolname 
+--------------+---------
+            2 | test_user
+
+
+
+Test_DB=> select count(pid) from pg_stat_activity where usename='test_user';
+ count 
+-------
+     2
+(1 row)
+
+[ec2-user@my-domain-1 ~]$ psql --host=rds.endpoint.amazonaws.com --port=5432 --username=test_user --dbname=Test_DB
+Password for user test_user: 
+psql: FATAL:  too many connections for role "test_user"
+
+Enable the following parameters: log_connections, log_disconnections 
+below information is from RDS console:  error/postgresql.log.2018-02-15-15
+2018-02-15 15:06:36 UTC::[unknown]@[unknown]:[2608]:LOG: connection received: host=123.45.67.8 port=55600
+2018-02-15 15:06:36 UTC:123.45.67.8(55600):test_user@Test_DB:[2608]:LOG: connection authorized: user=test_user database=Test_DB SSL enabled (protocol=TLSv1.2, cipher=ECDHE-RSA-AES256-GCM-SHA384, compression=off)
+2018-02-15 15:06:36 UTC:123.45.67.8(55600):test_user@Test_DB:[2608]:LOG: disconnection: session time: 0:00:00.019 user=test_user database=Test_DB host=123.45.67.8 port=55600
+
+******Relation Size******
+Test_DB=> select pg_size_pretty(sum(pg_total_relation_size(oid))) from pg_class where relkind in ('r','S','m') and not relisshared;
+ pg_size_pretty 
+----------------
+ 35 GB
+(1 row)
+
+Test_DB=> select pg_size_pretty(pg_database_size('Test_DB'));
+ pg_size_pretty 
+----------------
+ 35 GB
+(1 row)
+*pg_total_relation_size accepts the OID or name of a table or toast table, and returns the total on-disk space used for that table, including all associated indexes. This function is equivalent to pg_table_size + pg_indexes_size.
+
+postgres=# select pg_relation_filenode('tea');
+ pg_relation_filenode 
+----------------------
+                16415
+(1 row)
+
+postgres=# select pg_relation_filepath('tea');
+ pg_relation_filepath 
+----------------------
+ base/12921/16415
+(1 row)
+*pg_relation_filenode accepts the OID or name of a table, index, sequence, or toast table, and returns the "filenode" number currently assigned to it.
+*pg_relation_filepath is similar to pg_relation_filenode, but it returns the entire file path name (relative to the database cluster's data directory PGDATA) of the relation.
+https://www.postgresql.org/docs/9.4/static/functions-admin.html
+******Relation Size******
+
+******ChangeDatabaseCollation******
+Test_DB=> select * from pg_collation where collname like 'en_GB%';
+    collname     | collnamespace | collowner | collencoding |   collcollate   |    collctype    
+-----------------+---------------+-----------+--------------+-----------------+-----------------
+ en_GB           |            11 |        10 |            6 | en_GB.utf8      | en_GB.utf8
+ en_GB           |            11 |        10 |            8 | en_GB           | en_GB
+ en_GB           |            11 |        10 |           16 | en_GB.iso885915 | en_GB.iso885915
+ en_GB.iso88591  |            11 |        10 |            8 | en_GB.iso88591  | en_GB.iso88591
+ en_GB.iso885915 |            11 |        10 |           16 | en_GB.iso885915 | en_GB.iso885915
+ en_GB.utf8      |            11 |        10 |            6 | en_GB.utf8      | en_GB.utf8
+(6 rows)
+
+CREATE DATABASE test_collation WITH ENCODING='UTF8' LC_CTYPE='en_GB.UTF-8' LC_COLLATE='en_GB.UTF-8' TEMPLATE TEMPLATE0;
+
+Test_DB=> CREATE DATABASE test_collation WITH ENCODING='UTF8' LC_CTYPE='en_GB.UTF-8' LC_COLLATE='en_GB.UTF-8' TEMPLATE TEMPLATE0;
+CREATE DATABASE
+
+Test_DB=> \l test_collation
+                                 List of databases
+      Name      | Owner | Encoding |   Collate   |    Ctype    | Access privileges 
+----------------+-------+----------+-------------+-------------+-------------------
+ test_collation | zicky | UTF8     | en_GB.UTF-8 | en_GB.UTF-8 | 
+(1 row)
+
+Test_DB=> select datname, datcollate from pg_database where datname='test_collation';
+    datname     | datcollate  
+----------------+-------------
+ test_collation | en_GB.UTF-8
+(1 row)
+
+Test_DB=> CREATE DATABASE test_collation2 WITH ENCODING='UTF8' LC_CTYPE='en_GB.UTF-8' LC_COLLATE='en_GB.UTF-8' TEMPLATE TEMPLATE1;
+ERROR:  new collation (en_GB.UTF-8) is incompatible with the collation of the template database (en_US.UTF-8)
+HINT:  Use the same collation as in the template database, or use template0 as template.
+******ChangeDatabaseCollation******
+
+******OID******
+Object identifiers (OIDs) are used internally by PostgreSQL as primary keys for various system tables. 
+OIDs are not added to user-created tables, unless WITH OIDS is specified when the table is created, or the default_with_oids configuration variable is enabled.
+Type oid represents an object identifier.
+https://www.postgresql.org/docs/9.6/static/datatype-oid.html
+
+
+SELECT c.oid::regclass as table_name, c.relfrozenxid as age, c.relfrozenxid FROM pg_class c WHERE c.relkind = 't' ORDER BY 2 DESC LIMIT 20;
+SELECT c.oid::regclass as table_name, age(c.relfrozenxid) as age, c.relfrozenxid FROM pg_class c WHERE c.relkind = 't' ORDER BY 2 DESC LIMIT 20
+
+
+******OID******
+
+******SystemPrivileges******
+Below is the SQL you can use to know  privileges on system tables for rds_superuser role on RDS Postgres:
+
+SELECT relname, has_table_privilege('rds_superuser',relname,'SELECT') as SELECT,
+has_table_privilege('rds_superuser',relname,'UPDATE') as UPDATE,
+has_table_privilege('rds_superuser',relname,'INSERT') as INSERT,
+has_table_privilege('rds_superuser',relname,'TRUNCATE') as TRUNCATE
+FROM pg_class c , pg_namespace n where n.oid = c.relnamespace  and n.nspname in ('pg_catalog')  and relkind='r'; 
+******SystemPrivileges******
+
+******pg_stat_statements******
+— Reset statements. Empty everything out and start regathering
+SELECT pg_stat_statements_reset();
+
+— Which queries were called the most
+SELECT * FROM pg_stat_statements ORDER BY calls desc LIMIT 50;
+
+— Which queries used the most CPU time
+SELECT * FROM pg_stat_statements ORDER BY total_time desc LIMIT 50;
+
+— What are the top 50 queries that I should look at (by total time hit)?
+SELECT query,calls,total_time,rows,100.0 * shared_blks_hit / nullif(shared_blks_hit + shared_blks_read, 0) AS hit_percent,ROUND((total_time::numeric / calls::numeric),2) as average_time_per_call FROM pg_stat_statements ORDER BY total_time DESC LIMIT 50;
+
+— What are the top 50 queries that I should look at (by speed of execution) ?
+SELECT query, calls, total_time, rows, 100.0 * shared_blks_hit / nullif(shared_blks_hit + shared_blks_read, 0) AS hit_percent, ROUND((total_time::numeric / calls::numeric),2) as average_time_per_call FROM pg_stat_statements ORDER BY average_time_per_call DESC LIMIT 50;
+
+You can monitor the SQL statements by CPU with queries such as:
+Total time to see which query spends the most time in the database
+SELECT round(total_time*1000)/1000 AS total_time,query 
+FROM pg_stat_statements 
+ORDER BY total_time DESC;
+
+Total number of calls, total rows, etc
+SELECT query, calls, total_time, rows, 100.0 * shared_blks_hit /
+               nullif(shared_blks_hit + shared_blks_read, 0) AS hit_percent
+          FROM pg_stat_statements ORDER BY total_time DESC LIMIT 5;
+
+SELECT queryid, query, calls, total_time/calls, rows/calls, temp_blks_read/calls, temp_blks_written/calls
+FROM pg_stat_statements 
+WHERE calls != 0 
+ORDER BY total_time DESC LIMIT 10;
+
+SELECT  substring(query, 1, 50) AS short_query,round(total_time::numeric, 2) AS total_time,calls,round(mean_time::numeric, 2) AS mean,round((100 * total_time/sum(total_time::numeric) OVER ())::numeric, 2) AS percentage_cpu
+FROM    pg_stat_statements
+ORDER BY total_time DESC
+LIMIT 10;
+******pg_stat_statements******
+
+******StorageParameterForTables******
+select relname, reloptions from pg_class where reloptions is not null;
+******StorageParameterForTables******
+
+******AutovacuumLogging******
+In a custom parameter group, enable the parameter "rds.force_autovacuum_logging_level", there are different options, use "log" to track autovacuum activity
+Below is an example, to have autovacuum run on a table:
+Step 1: Verify the size of a table "zicky_test"
+Test_DB=> \dt+
+                              List of relations
+ Schema |      Name       | Type  |     Owner     |    Size    | Description 
+--------+-----------------+-------+---------------+------------+-------------
+ public | zicky_test      | table | zicky         | 15 GB      | 
+(1 rows)
+
+Step 2: Change the storage parameter to make autovacuum it more aggressive and analyze the table more frequently
+Test_DB=> alter table zicky_test set (autovacuum_analyze_scale_factor='0.001');
+ALTER TABLE
+Test_DB=> select relname, reloptions from pg_class where reloptions is not null;
+    relname    |                                             reloptions                                              
+---------------+-----------------------------------------------------------------------------------------------------
+ zicky_test    | {autovacuum_analyze_scale_factor=0.001}
+(1 rows)
+
+Step 3: delete a bunch of rows
+Test_DB=> delete from zicky_test where street='testing12345678';
+DELETE 12058624
+
+Step 4: Check the log file verify if autovacuum was run on the table
+2018-06-28 13:43:44 UTC::@:[19230]:LOG: automatic analyze of table "Test_DB.public.zicky_test" system usage: CPU 0.46s/1.26u sec elapsed 60.38 sec
+******AutovacuumLogging******
+
+******Search Path******
+Test_DB=> show search_path;
+      search_path       
+------------------------
+ "$user", public, tiger
+(1 row)
+
+Test_DB=> create schema s1;
+CREATE SCHEMA
+Test_DB=> create schema s2;
+CREATE SCHEMA
+Test_DB=> create table s1.t1 (name varchar(40));
+CREATE TABLE
+Test_DB=> create table s2.t2 (name varchar(40));
+CREATE TABLE
+Test_DB=> select * from t1;
+ERROR:  relation "t1" does not exist
+LINE 1: select * from t1;
+                      ^
+Test_DB=> set search_path to "$user", public, tiger, s1;
+SET
+Test_DB=> show search_path ;
+        search_path         
+----------------------------
+ "$user", public, tiger, s1
+(1 row)
+
+Test_DB=> 
+Test_DB=> select * from t1;
+ name 
+------
+(0 rows)
+
+Test_DB=> 
+******Search Path******
+
+******SSL******
+RDS Postgres SSL: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_PostgreSQL.html#PostgreSQL.Concepts.General.SSL
+
+Allows encryption of a client connection to the RDS Postgres Server
+-SSL support is available in all AWS regions for PostgreSQL
+-When an RDS Postgres instance is launched, we create an SSL certificate. The certificate will include the the RDS endpoint as the common name
+-Public Key is for customers, they download the bundle from S3 (rds-combined-ca-bundle.pem)
+-This bundle will include the certifications need + the public key
+-The Private key is installed on the RDS Postgres instance
+-Only the public key can be used to decrypt information from the private key
+-In the pg_hba.conf (used for client connections), I believe the option hostssl (used to accept client connections via TCP/IP and SSL https://www.postgresql.org/docs/current/auth-pg-hba-conf.html)
+
+rds.force_ssl is a static parameter, which I believe will ensure that HM uncomments out the line hostssl in the pg_hba.conf file
+
+Connect via SSL ie with my certificate 
+
+[ec2-user@my-domain-1 ~]$ psql -h postgresql.endpoint.us-east-1.rds.amazonaws.com -p 5432 "dbname=Test_DB user=zicky sslrootcert=rds-combined-ca-bundle.pem sslmode=verify-full"
+Password: 
+psql (9.5.14, server 9.4.15)
+SSL connection (protocol: TLSv1.2, cipher: ECDHE-RSA-AES256-GCM-SHA384, bits: 256, compression: off)
+Type "help" for help.
+
+Test_DB=> 
+FROM MY LOG FILE, it shows SSL:
+2018-12-11 17:19:47 UTC:172.31.31.5(56538):zicky@Test_DB:[31527]:LOG: connection authorized: user=zicky database=Test_DB SSL enabled (protocol=TLSv1.2, cipher=ECDHE-RSA-AES256-GCM-SHA384, compression=off)
+
+
+Connect via SSL but using a CNAME which point to my RDS endpoint
+
+[ec2-user@my-domain-1 ~]$ nslookup test1.zicky.com
+Server:		172.1.2.3.4
+Address:	172.1.2.3.4#53
+
+Non-authoritative answer:
+test1.zicky.com	canonical name = postgresql.endpoint.us-east-1.rds.amazonaws.com.
+postgresql.endpoint.us-east-1.rds.amazonaws.com	canonical name = ec2-34-567-89-1234.compute-1.amazonaws.com.
+Name:	ec2-34-567-89-1234.compute-1.amazonaws.com
+Address: 172.00.40.00
+
+
+[ec2-user@my-domain-1 ~]$ psql -h test1.zicky.com -p 5432 "dbname=Test_DB user=zicky sslrootcert=rds-combined-ca-bundle.pem sslmode=verify-full"
+psql: server certificate for "postgresql.endpoint.us-east-1.rds.amazonaws.com" does not match host name "test1.zicky.com"
+
+
+Here I change the SSL mode to require: https://www.postgresql.org/docs/9.6/libpq-ssl.html
+
+[ec2-user@my-domain-1 ~]$ psql -h test1.zicky.com -p 5432 "dbname=Test_DB user=zicky sslrootcert=rds-combined-ca-bundle.pem sslmode=require"
+Password: 
+psql (9.5.14, server 9.4.15)
+SSL connection (protocol: TLSv1.2, cipher: ECDHE-RSA-AES256-GCM-SHA384, bits: 256, compression: off)
+Type "help" for help.
+
+Test_DB=> \q
+ 
+
+******SSL******
+
+******Replication with RDS Postgres******
+In RDS Postgres, we take a snapshot of the master instance and restore in the same region, in read-only (wal_level = hot_standby) mode.
+Cross Region Replica, is in a different AZ and uses replication slots
+
+Types of Replication:
+
+1: Streaming replication (wal sender process (on the master) sends WAL records to the WAL receiver process on the replica), refers to the ability to stream new data pages over a network connection
+2: WAL Based replication, when streaming replication is stopped due to an error, we fall back to the S3 (archive location) in order for the replica to catch up. 
+3: Logical replication, uses replication slots (primarily used by DMS), can be used to access the WAL record before its applied (wal_level = logical)
+4: Physical replication, used for cross replication, WAL a retained on the master until the replica has received it
+
+Important things:
+PRIMARY
+pg_hba.conf - put IP address of the standby here, example below:
+host replication rep_user 172.31.55.5/32 trust
+postgresql.conf - change the parameter "listen_address", "max_wal_sender", "wal_level"
+postgres@ip-172-00-00-00 postgres]$ cat postgresql.conf |grep -i listen
+listen_addresses = '*'		# what IP address(es) to listen on;
+postgres@ip-172-00-00-00 postgres]$ cat postgresql.conf |grep -i max_wal
+max_wal_senders = 10		# max number of walsender processes
+postgres@ip-172-00-00-00 postgres]$ cat postgresql.conf |grep -i wal_level
+wal_level = replica			# minimal, replica, or logical
+
+STANDBY
+postgres@ip-172-00-00-00 postgres]$ cat recovery.conf 
+standby_mode = 'on'
+primary_conninfo = 'host=172-00-00-00 port=5432 user=rep_user password=rep1234' 
+restore_mode = " used to copy log files back from archival storage " : http://www.pgpool.net/docs/pgpool-II-3.5.4/doc/recovery.conf.sample
+Verify that the replica is in recovery mode (i.e is a replica):
+postgres=# select pg_is_in_recovery();
+ pg_is_in_recovery 
+-------------------
+ t
+(1 row)
+
+Common Replication Errors:
+"Canceling statement due to conflict with recovery Detail: User query might have needed to see row versions that must be removed"
+	*hot_standby_feedback (parameter): eliminates query cancels caused from cleanup records.
+	*vacuum_defer_cleanup_age: This will prevent dead rows from being cleaned up as they would normally be cleaned up. This allows more time for queries on the standby to complete without incurring conflicts due to early cleanup of rows
+	DOWSIDE:
+		*Enabling this can lead to table bloat, master will keep growing in size and wont remove dead type that are still required in RR.
+ 	
+ 	*max_standby_streaming/archive_delay: when a conflict arises (ie we need to remove a tuple that the RR is using, Postgres will wait 30 seconds (which is the default) before cancelling the query)
+ 		When this parameter is set to '-1' allows the standby to wait forever for conflicting queries to complete, downside is that replica lag can increase
+ 		Ref: https://www.postgresql.org/docs/9.6/hot-standby.html#HOT-STANDBY-CONFLICT
+ 	DOWNSIDE:
+ 		*Force recovery to block forever on conflicting queries.  
+ 		*Lagging recovery on the replica,
+ 		*Using more disk space for WAL (pile up of WAL to be replayed)
+ 		*Falling behind to pulling WAL archives from S3.
+ "FATAL: could not receive data from WAL stream: ERROR: requested WAL segment 000000010000001A000000D3 has already been removed”
+ 	*wal_keep_segments: the amount of WAL segments retained on the master. Default is 32 files, 16 MB each
+ 	
+ Other factors to consider (why replication might not be keeping up):
+ 	*Different instance/storage class
+ 	*EBS pre-warming, (EBS stats page)
+ 	*Large VACUUM records
+ 	
+******Replication with RDS Postgres******
+
+******How to Speed up an Import?******
+
+https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/PostgreSQL.Procedural.Importing.html
+Parameters to consider:
+	*maintenance_work_mem = 1GB, 2GB etc : his parameter is used during CREATE INDEX statements and each parallel command can use this much memory
+	*checkpoint_segments = 256 : The value for this setting consumes more disk space, but gives you less contention on your WAL logs
+	*checkpoint_timeout = 1800 : The value for this setting allows for less frequent WAL rotation
+	synchrous_commit = off : Disable this setting to speed up writes. Turning this parameter off can increase the risk of data loss in the event of a server crash (do not turn off FSYNC) 
+	*wal_buffers = 8192 OR 8GB : This is value is in 8 KB units. This again helps your WAL generation speed
+	*autovacuum = off : Disable the PostgreSQL auto vacuum parameter while you are loading data so that it doesn’t use resources
+	
+******How to Speed up an Import?******
+
+******Postgres Default Processes******
+
+1: Background writer: 	 		In this process, dirty pages on the shared buffer pool are written to a persistent storage (e.g., HDD, SSD) on a regular basis gradually. 
+2: Checkpointer: 	     		In this process in version 9.2 or later, checkpoint process is performed. 	
+3: Autovacuum launcher: 	 	The autovacuum-worker processes are invoked for vacuum process periodically. (More precisely, it requests to create the autovacuum workers to the postgres server.) 	
+4: WAL writer: 	         		This process writes and flushes periodically the WAL data on the WAL buffer to persistent storage. 	Section 9.9
+5: Statistics collector:  		In this process, statistics information such as for pg_stat_activity and for pg_stat_database, etc. is collected. 	 
+6: Logging collector (logger): 	This process writes error messages into log files. 	 
+7: Archiver:				 	In this process, archiving logging is executed. 	
+
+******Postgres Default Processes******
+
+****** Checkpoints in Postgres ******
+
+Checkpoint ensures that modified/dirty pages have been written to the disk (changes made to the WAL log will be reflected on disk, i.e this is done by the checkpointer process)
+The backgroud writer's also writes these dirty pages from shared buffers to the data files. The background writer has its on timing scheduling as to when it checks for dirty pages to write (i.e bgwriter_delay etc)
+Both the background writer and checkpointer process write dirty pages from shared buffers to disk, less work for the checkpointer process
+http://www.interdb.jp/pg/pgsql09.html#_9.7.
+https://www.cybertec-postgresql.com/en/postgresql-writer-and-wal-writer-processes-explained/
+
+Checkpoint_timeouts: Maximum time between automatic WAL checkpoints, in seconds. The valid range is between 30 seconds and one day. The default is five minutes (5min). Increasing this parameter can increase the amount of time needed for crash recovery ( MORE WALs TO REPLAY).
+Checpoint_segments:  Maximum number of log file segments between automatic WAL checkpoint. Default is 3 (16MB, each), increasing this means more WAL to replay.
+Note that after 9.5 this parameter was replaced by max_wal_size: Maximum size to let the WAL grow to between automatic WAL checkpoints. This is a soft limit; 
+Checkpoint_completion_target: Specifies the target of checkpoint completion, as a fraction of total time between checkpoints
+
+Full_page_writes: When this parameter is on, the PostgreSQL server writes the entire content of each disk page to WAL during the first modification of that page after a checkpoint. This is needed because a page write that is in process during an operating system crash might be only partially completed, leading to an on-disk page that contains a mix of old and new data. The row-level change data normally stored in WAL will not be enough to completely restore such a page during post-crash recovery. Storing the full page image guarantees that the page can be correctly restored, but at the price of increasing the amount of data that must be written to WAL. (Because WAL replay always starts from a checkpoint, it is sufficient to do this during the first change of each page after a checkpoint. Therefore, one way to reduce the cost of full-page writes is to increase the checkpoint interval parameters.)
+
+https://blog.2ndquadrant.com/on-the-impact-of-full-page-writes/
+
+****** Checkpoints in Postgres ******
+
+****** MVCC ******
+https://www.postgresql.org/docs/9.6/mvcc-intro.html
+Multiversion Concurrency Control: This means that each SQL statement sees a snapshot of data (a database version) as it was some time ago, regardless of the current state of the underlying data
+This is done using XID's or Transaction ID
+
+Postgres has 3 (4 but Read Uncommitted is supported in PG) kinds of isolation levels: https://www.postgresql.org/docs/9.6/transaction-iso.html
+Read Committed: is the default isolation level in PostgreSQL. When a transaction uses this isolation level, a SELECT query (without a FOR UPDATE/SHARE clause) sees only data committed before the query began; it never sees either uncommitted data or changes committed during query execution by concurrent transactions.
+Repeatable Read: isolation level only sees data committed before the transaction began; it never sees either uncommitted data or changes committed during transaction execution by concurrent transactions. (However, the query does see the effects of previous updates executed within its own transaction, even though they are not yet committed.)
+Serializable: isolation level provides the strictest transaction isolation. This level emulates serial transaction execution for all committed transactions; as if transactions had been executed one after another, serially, rather than concurrently.
+
+
+
+https://www.postgresql.org/docs/9.6/ddl-system-columns.html
+XMIN is the XID that created the tuple
+XMAX is the XID that removed the tuple
+
+
+******VACUUM******
+Jobs of the vacuum
+1: To recover or reuse disk space occupied by updated or deleted rows.
+2: To update data statistics used by the PostgreSQL query planner.
+3: To update the visibility map, which speeds up index-only scans.
+4: To protect against loss of very old data due to transaction ID wraparound or multixact ID wraparound.
+******VACUUM******
+
+******IndexDefinition******
+Test_DB=> \di
+                             List of relations
+ Schema |          Name          | Type  |     Owner     |      Table      
+--------+------------------------+-------+---------------+-----------------
+ public | referrer_gist_trgm_idx | index | rds_superuser | testing_stuff
+ public | spatial_ref_sys_pkey   | index | rdsadmin      | spatial_ref_sys
+ public | t_idx                  | index | zicky         | t_test
+ public | testing_idx            | index | zicky         | zicky_test2
+ public | zicky2_idx             | index | zicky         | zicky_test3
+(5 rows)
+
+
+Test_DB=> \x
+Expanded display is on.
+Test_DB=> select * from pg_indexes where indexname='zicky2_idx';
+-[ RECORD 1 ]---------------------------------------------------------
+schemaname | public
+tablename  | zicky_test3
+indexname  | zicky2_idx
+tablespace | lib_data
+indexdef   | CREATE INDEX zicky2_idx ON zicky_test3 USING btree (name)
+
+Test_DB=> 
+******IndexDefinition******
+
+******IAM With RDS Postgres******
+IAM Postgres announcement: https://aws.amazon.com/about-aws/whats-new/2018/09/amazon-rds-postgresql-now-supports-iam-authentication/
+
+https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html
+
+You can authenticate to your DB instance using AWS Identity and Access Management (IAM) database authentication. IAM database authentication works with MySQL and PostgreSQL. With this authentication method, you don't need to use a password when you connect to a DB instance. Instead, you use an authentication token. 
+
+Works with Postgres versions: 9.5.14, 9.6.9 or higher, and version 10.4 or higher. 
+Limitations:
+
+1: The maximum number of connections for your database instance may be limited depending on the instance type and your workload.
+2: IAM database authentication is not supported with M5 instance types? https://tt.amazon.com/0178401480
+EC2 Types: https://aws.amazon.com/ec2/instance-types/
+https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/virtualization_types.html
+
+Steps to using IAM:
+1: Enable SSL via the parameter group. 
+2: Modify RDS instance and choose: Enable IAM DB Authentication
+3: Create an IAM user or role (role doesnt work with Postgres: https://tt.amazon.com/0166705596 password length generated by the token is too long 
+4: Attach the IAM policy to the IAM user
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "rds-db:connect"
+            ],
+            "Resource": [
+                "arn:aws:rds-db:us-east-1:600000000000:dbuser:db-WNVK7FV52OQLZ7HDA5CMC5TWNY/iam_user"
+            ]
+        }
+    ]
+}
+5: Create the db user and grant the role;
+
+testdb=> create user iam_user with login; 
+CREATE ROLE
+testdb=> grant rds_iam to iam_user;
+GRANT ROLE
+testdb=> \q
+
+6: Generate IAM authentication token
+[ec2-user@my-domain-1 ~]$ export RDSHOST="iampostgres.endpoint.us-east-1.rds.amazonaws.com"
+[ec2-user@my-domain-1 ~]$ export PGPASSWORD="$(aws rds generate-db-auth-token --hostname $RDSHOST --port 5432 --region us-east-1 --username iam_user --profile iam_user)"
+
+7: Connect to the instance
+[ec2-user@my-domain-1 ~]$ psql "host=$RDSHOST port=5432 sslmode=verify-full sslrootcert=rds-combined-ca-bundle.pem dbname=testdb user=iam_user password=$PGPASSWORD"
+psql (9.5.14, server 10.4)
+WARNING: psql major version 9.5, server major version 10.
+         Some psql features might not work.
+SSL connection (protocol: TLSv1.2, cipher: ECDHE-RSA-AES256-GCM-SHA384, bits: 256, compression: off)
+Type "help" for help.
+
+testdb=> \q
+******IAM With RDS Postgres******
