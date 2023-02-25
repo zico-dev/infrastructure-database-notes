@@ -6,7 +6,7 @@ metadata:
     app: postgres-deployment
   name: postgres-deployment
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: postgres-deployment
