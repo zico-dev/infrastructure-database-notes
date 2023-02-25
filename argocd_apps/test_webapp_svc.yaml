@@ -1,0 +1,31 @@
+apiVersion: v1
+items:
+- apiVersion: v1
+  kind: Service
+  metadata:
+    creationTimestamp: "2020-05-03T21:28:29Z"
+    name: myapp
+    namespace: test-webapp
+    resourceVersion: "5557195"
+    selfLink: /api/v1/namespaces/test-webapp/services/myapp
+    uid: 084eb801-8d85-11ea-8f4c-0e634695b243
+  spec:
+    clusterIP: 10.100.254.11
+    externalTrafficPolicy: Cluster
+    ports:
+    - nodePort: 30307
+      port: 80
+      protocol: TCP
+      targetPort: 80
+    selector:
+      app: myapp
+    sessionAffinity: None
+    type: LoadBalancer
+  status:
+    loadBalancer:
+      ingress:
+      - hostname: a084eb8018d8511ea8f4c0e634695b24-550017850.us-east-1.elb.amazonaws.com
+kind: List
+metadata:
+  resourceVersion: ""
+  selfLink: ""
