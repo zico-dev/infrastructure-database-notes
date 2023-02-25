@@ -24,7 +24,7 @@ items:
   status:
     loadBalancer:
       ingress:
-      - hostname: a084eb8018d8511ea8f4c0e634695b24-550017850.us-east-1.elb.amazonaws.com
+      - hostname: https://kubernetes.default.svc
 kind: List
 metadata:
   resourceVersion: ""
